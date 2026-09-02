@@ -1,0 +1,41 @@
+{
+  "name": "haiglobals-node-functions",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file=.env watch src/server.ts",
+    "start": "tsx --env-file=.env src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "push:test": "tsx --env-file=.env tests/send-test-push.ts",
+    "test": "tsx --env-file=.env tests/api-test-runner.ts",
+    "test:list": "tsx --env-file=.env tests/api-test-runner.ts --list",
+    "test:hello": "tsx --env-file=.env tests/api-test-runner.ts --tag hello",
+    "test:checkout": "tsx --env-file=.env tests/api-test-runner.ts --tag checkout",
+    "test:orders": "tsx --env-file=.env tests/api-test-runner.ts --tag order-cancel",
+    "test:logistics": "tsx --env-file=.env tests/api-test-runner.ts --tag logistics",
+    "test:vendor-subscriptions": "tsx --env-file=.env tests/api-test-runner.ts --tag vendor-subscription",
+    "test:contracts": "tsx --env-file=.env tests/api-test-runner.ts --tag all-apis",
+    "test:schema": "tsx --env-file=.env tests/api-test-runner.ts --tag schema",
+    "test:invoices": "tsx --env-file=.env tests/api-test-runner.ts --tag invoice"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.2.0",
+    "opencc-js": "^1.4.2",
+    "tsx": "^4.20.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.15.29",
+    "eslint": "^10.5.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

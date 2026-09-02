@@ -1,0 +1,22 @@
+services:
+  care-api:
+    build: .
+    container_name: care-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=9100
+      - LIBRETRANSLATE_URL=http://libretranslate:5000
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./secrets:/app/secrets:ro
+    networks:
+      - default
+      - carenet
+networks:
+  default: {}
+  carenet:
+    external: true
