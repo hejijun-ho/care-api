@@ -115,6 +115,33 @@ function jsonResponse(payload: unknown, status = 200): Response {
 const HOST = process.env.HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORT ?? 9000);
 
+// 環境防呆：ENVIRONMENT 必須和 SUPABASE_URL 對得上，避免「測試程式碼打到正式庫」或反過來。
+//   production ↔ https://api.haiglobals.com、staging ↔ https://api-staging.haiglobals.com
+// 對不上就拒絕啟動（容器會 restart loop，docker logs 看得到原因），而不是默默跑錯庫。
+function assertEnvironmentMatchesSupabaseUrl(): void {
+  const environment = (process.env.ENVIRONMENT ?? "").trim().toLowerCase();
+  const supabaseUrl = (process.env.SUPABASE_URL ?? "").trim();
+  let host = "";
+  try {
+    host = new URL(supabaseUrl).host;
+  } catch {
+    host = "";
+  }
+  const looksStaging = host.startsWith("api-staging.");
+  const looksProduction = host === "api.haiglobals.com";
+  const ok =
+    (environment === "production" && looksProduction) ||
+    (environment === "staging" && looksStaging) ||
+    (environment !== "production" && environment !== "staging" && host !== ""); // dev/local: 不限制
+  if (!ok) {
+    console.error(
+      `[care-api] refusing to start: ENVIRONMENT=${environment || "(unset)"} does not match SUPABASE_URL=${supabaseUrl || "(unset)"}`,
+    );
+    process.exit(1);
+  }
+}
+assertEnvironmentMatchesSupabaseUrl();
+
 const server = createServer(async (req, res) => {
   try {
     const origin = getPublicOrigin(req);
