@@ -17,6 +17,9 @@ const PRINT_ENV_NAMES = [
   "ECPAY_MERCHANT_ID",
 ] as const;
 
+// 正式環境只回報「有沒有設」，不回傳值（例如綠界商店代號），避免對外的健康檢查端點洩漏設定。
+const IS_PRODUCTION = (process.env.ENVIRONMENT ?? "").trim().toLowerCase() === "production";
+
 function readEnvSnapshot(): EnvSnapshotItem[] {
   return PRINT_ENV_NAMES.map((name) => {
     const rawValue = process.env[name]?.trim();
@@ -24,7 +27,7 @@ function readEnvSnapshot(): EnvSnapshotItem[] {
     return {
       name,
       exists: Boolean(rawValue),
-      value: rawValue || null,
+      value: IS_PRODUCTION ? null : rawValue || null,
     };
   });
 }

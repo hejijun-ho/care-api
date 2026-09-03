@@ -3,7 +3,14 @@
 從 haiglobals-api（`haiglobals-node-functions`，分支 `feat/care-ecpay`）分出來的 care 專用後端：綠界金流（儲值／訂閱／退款／回呼）、推播（FCM／APNs 來電與一般通知）、翻譯（LibreTranslate）、帳號刪除。
 每支 API 一個檔案：`src/functions/<name>.ts`，`default export` 為 handler；`src/server.ts` 啟動時自動掃描 `functions/`，免登記。路徑 `/functions/v1/<name>`（App 用）或 `/<name>`（本機測試）。
 
-管理方式照 Higlobal：**repo 只有 `main`**，測試與正式環境「只差 `.env`」；一個容器 `care-api`，平常單獨測某支 API，測完再更新進容器。
+管理方式照 Higlobal：**repo 只有 `main`**，測試與正式環境「只差 `.env`」，兩個目錄各自 `git pull`、各跑一個容器：
+
+| | 目錄（server） | 容器 | 埠 | 對外網址 |
+|---|---|---|---|---|
+| 測試 | `/srv/staging/carematching/apps/care-api` | `care-api-staging` | 127.0.0.1:9100 | `carematching.haiglobals.com`、`ecpay.care-matching.com` |
+| 正式 | `/srv/production/carematching/apps/care-api` | `care-api` | 127.0.0.1:9101 | `api.care-matching.com` |
+
+各目錄的 `.env` 除了應用設定，還帶三個給 docker-compose 的變數：`CARE_API_PROJECT`（專案／容器名）、`CARE_API_IMAGE`（`care-api:staging` / `care-api:prod`，一定要分開）、`CARE_API_HOST_PORT`。
 
 ## 本機開發與單支 API 測試
 
@@ -26,19 +33,25 @@ npm run typecheck && npm run lint
 # 1. 本機：測完 push 到 GitHub main
 git add … && git commit -m "…" && git push
 
-# 2. server：拉下來、重建、看 log
+# 2. server：測試目錄先拉下來、重建、看 log
 ssh hejijun@osmile
 cd /srv/staging/carematching/apps/care-api
 git pull --ff-only
 docker compose up -d --build
-docker logs -f --tail 100 care-api
-curl -s http://127.0.0.1:9100/hello
+docker logs -f --tail 100 care-api-staging
+curl -s -X POST http://127.0.0.1:9100/functions/v1/hello -H 'Content-Type: application/json' -d '{}'
+
+# 3. 測完再上正式（同樣兩行）
+cd /srv/production/carematching/apps/care-api
+git pull --ff-only && docker compose up -d --build
+docker logs --tail 50 care-api
 ```
 
-容器只綁 `127.0.0.1:9100`，對外由 host Caddy（`/etc/caddy/tenants.d/carematching/care.caddy`）以 `carematching.haiglobals.com`／`ecpay.care-matching.com` 反向代理。
+容器只綁 127.0.0.1，對外由 host Caddy（`/etc/caddy/tenants.d/carematching/care.caddy`）反向代理。
 `.env` 與 `secrets/`（APNs `.p8`）留在 server 目錄、唯讀掛進容器，不進 image、不進 git。
+Docker Hub 偶爾逾時會讓 `--build` 失敗：舊 image 還在，先 `docker compose up -d --no-build` 把服務拉起來，稍後再 build。
 
-切到正式環境時：改 server 上的 `.env`（正式 Supabase key、綠界正式商店與端點、`APNS_ENV=production`、新的 `CRON_PUSH_SECRET`），`docker compose up -d`，再把 DB `care_push_config.cron_key` 與三個推播函式（`push_notify`、`dispatch_due_care_reminders`、`push_on_guarantee_arrears`）內的網址對齊。
+推播用的 care-api 網址由各環境資料庫的 `care_push_config`（`k='notify_url'`）決定，`cron_key` 則要等於該環境 `.env` 的 `CRON_PUSH_SECRET`。`scripts/switch-env.sh` 是單容器時期的切換工具，現在留作備援。
 
 ## 與資料庫的關係
 
