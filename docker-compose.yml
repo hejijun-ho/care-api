@@ -1,7 +1,21 @@
+# care-api — 同一份 compose 給測試與正式兩個容器用（照 Higlobal：兩個目錄、各自 git pull，只差 .env）。
+#
+#   /srv/staging/carematching/apps/care-api     .env: CARE_API_PROJECT=care-api-staging CARE_API_IMAGE=care-api:staging CARE_API_HOST_PORT=9100
+#   /srv/production/carematching/apps/care-api  .env: CARE_API_PROJECT=care-api         CARE_API_IMAGE=care-api:prod    CARE_API_HOST_PORT=9101
+#
+# 這三個變數由各目錄的 .env 提供（docker compose 會自動讀 ./.env 做變數代換）；沒設就等於原本單容器的行為
+# （專案/容器名 care-api、image care-api:latest、埠 9100）。image 名一定要分開，否則兩邊 --build 會互相蓋掉。
+#   • restart: unless-stopped → 伺服器 reboot 後自己回來。
+#   • 只開在 127.0.0.1:<埠> → 對外由 host Caddy 反向代理（care.caddy）。
+#   • .env / secrets 用唯讀 mount，秘密留在主機、不烘進 image。
+#   • HOST=0.0.0.0：容器內一定要綁 0.0.0.0，發佈的埠才連得到（environment 會蓋過 .env 的 HOST）。
+name: ${CARE_API_PROJECT:-care-api}
+
 services:
   care-api:
     build: .
-    container_name: care-api
+    image: ${CARE_API_IMAGE:-care-api:latest}
+    container_name: ${CARE_API_PROJECT:-care-api}
     restart: unless-stopped
     environment:
       - NODE_ENV=production
@@ -9,13 +23,14 @@ services:
       - PORT=9100
       - LIBRETRANSLATE_URL=http://libretranslate:5000
     ports:
-      - "127.0.0.1:9100:9100"
+      - "127.0.0.1:${CARE_API_HOST_PORT:-9100}:9100"
     volumes:
       - ./.env:/app/.env:ro
       - ./secrets:/app/secrets:ro
     networks:
       - default
       - carenet
+
 networks:
   default: {}
   carenet:
