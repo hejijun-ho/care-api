@@ -240,10 +240,15 @@ function chunk<T>(items: T[], size: number): T[][] {
 // 推播是「發訊端組文案、收訊端收」，所以收訊者的語言必須在**這裡**才查得到——
 // 發訊的 DB 觸發器不知道對方看什麼語言。
 //
-// ⚠ 只翻 title 與 body；**body_prefix 一個字都不翻**。DB 那邊的推播內文是
-// 「被照顧者姓名・服務類型」＋固定句子組成的，整串送去機器翻譯等於把姓名送出去
-// （而且每個姓名都是新的翻譯快取鍵，永遠不命中）。呼叫端把姓名放 body_prefix、
-// 把固定句子放 body，這裡翻完再接回去。
+// 推播內文的四段式約定（呼叫端負責拆，這裡負責翻與組裝）：
+//   body_prefix     姓名等使用者資料 —— **一個字都不翻**
+//   body_prefix_tr  前綴裡可以翻的部分（服務類型「居家陪伴」）—— App 各處都翻它，
+//                   推播不翻就前後不一致
+//   body            固定句子或含 %s/%d 的模板 —— 翻譯的對象
+//   body_values     填進模板的動態值（金額）—— 翻完才填，所以快取鍵是靜態模板
+// 整串送去機器翻譯等於把姓名送出去，而且每個姓名都是新的快取鍵、永遠不命中。
+// `body_prefix` 或 `body_prefix_tr` **任一個 key 存在**＝呼叫端採用了這個約定，
+// 也就是 body 可以翻；兩個都沒有就保守地原樣送出。
 
 /// 取每位收訊者的語言（user_settings.language）；查不到或失敗一律當 zh-TW。
 async function languagesForUsers(userIds: string[]): Promise<Map<string, string>> {
@@ -270,20 +275,48 @@ async function languagesForUsers(userIds: string[]): Promise<Map<string, string>
   return out;
 }
 
-/// 把 title / body 翻成 [lang]。任何失敗都回原文——推播寧可是中文，也不能不送。
+/// 把 title / body / 可翻前綴翻成 [lang]。任何失敗都回原文——推播寧可是中文，也不能不送。
 async function localize(
   title: string,
   body: string,
+  prefixTr: string,
   lang: string,
-): Promise<{ title: string; body: string }> {
-  if (!lang || lang === "zh-TW" || (!title && !body)) return { title, body };
+): Promise<{ title: string; body: string; prefixTr: string }> {
+  if (!lang || lang === "zh-TW" || (!title && !body && !prefixTr)) return { title, body, prefixTr };
   try {
-    const { translations } = await translateTexts([title, body], "zh-TW", lang);
-    return { title: translations[0] ?? title, body: translations[1] ?? body };
+    const { translations } = await translateTexts([title, body, prefixTr], "zh-TW", lang);
+    return {
+      title: translations[0] ?? title,
+      body: translations[1] ?? body,
+      prefixTr: translations[2] ?? prefixTr,
+    };
   } catch (e) {
     console.error("[send-notification] localize failed", { lang, message: errorMessage(e) });
-    return { title, body };
+    return { title, body, prefixTr };
   }
+}
+
+/// 把翻好的句子填上動態值。**值不進機器翻譯**：模板是靜態的，快取鍵才穩定
+/// （與 app 端 `ref.tr(模板).replaceFirst('%d', 值)` 是同一套做法）。
+/// ⚠ 依 token 在譯文中出現的**順序**填。單一 token 時沒有風險；多個 token 的模板
+/// 若譯者調換了順序，值會跟著換位——校訂驗收有「多佔位符有序序列」檢查在擋。
+export function fillValues(text: string, values: string[]): string {
+  if (!values.length) return text;
+  let i = 0;
+  return text.replace(/%[ds]/g, (whole) => (i < values.length ? values[i++] : whole));
+}
+
+/// 組出最後的推播內文：姓名（不翻）・服務類型（已翻）＋ 空白 ＋ 填好值的句子（已翻）。
+/// 空的段落一律略過，不會留下孤零零的「・」或多餘空白。
+/// 匯出供測試（tests/notification_body_test.ts）；正式流程只由本檔內部呼叫。
+export function composeBody(
+  prefix: string,
+  prefixTr: string,
+  body: string,
+  values: string[],
+): string {
+  const head = [prefix, prefixTr].filter((x) => x).join("・");
+  return [head, fillValues(body, values)].filter((x) => x).join(" ");
 }
 
 const handleRequest = async (req: Request): Promise<Response> => {
@@ -306,8 +339,17 @@ const handleRequest = async (req: Request): Promise<Response> => {
     // 動態前綴（被照顧者姓名・服務類型…）：原樣接在譯文前面，**永不送去翻譯**。
     // 這個 **key 存在與否**＝呼叫端是否採用「前綴／句子分開」的約定，也就是 body 可不可以翻。
     // 值可以是空字串（例如服務類型剛好沒填），那仍代表 body 是乾淨的句子、可以翻。
-    const bodySplit = Object.prototype.hasOwnProperty.call(body, "body_prefix");
+    const bodySplit =
+      Object.prototype.hasOwnProperty.call(body, "body_prefix") ||
+      Object.prototype.hasOwnProperty.call(body, "body_prefix_tr");
     const bodyPrefix = String(body.body_prefix ?? "").trim();
+    // 前綴裡**可以翻**的那一段（服務類型「居家陪伴」之類）。姓名放 body_prefix 永不翻，
+    // 服務類型放這裡——App 各處都是 `ref.tr(serviceType)`，推播不翻就前後不一致。
+    const bodyPrefixTr = String(body.body_prefix_tr ?? "").trim();
+    // 句子裡的動態值（金額…）。模板留在 body、翻完才填，快取鍵才穩定。
+    const bodyValues = Array.isArray(body.body_values)
+      ? (body.body_values as unknown[]).map((v) => String(v ?? ""))
+      : [];
     const route = String(body.route ?? "").trim();
     if (!title && !messageBody) {
       return json({ error: "title or body is required" }, 400);
@@ -408,9 +450,14 @@ const handleRequest = async (req: Request): Promise<Response> => {
       // 完整字串，整串送去翻譯等於把使用者資料送出去。呼叫端要先把動態值拆到
       // body_prefix、把固定句子留在 body，才代表「這句可以翻」。
       // 標題不受此限——DB 那邊的 title 全是固定片語（「有買家出價」「服務已完成」…）。
-      const localized = await localize(title, bodySplit ? messageBody : "", lang);
+      const localized = await localize(
+        title,
+        bodySplit ? messageBody : "",
+        bodySplit ? bodyPrefixTr : "",
+        lang,
+      );
       const finalBody = bodySplit
-        ? [bodyPrefix, localized.body].filter((s) => s).join(" ")
+        ? composeBody(bodyPrefix, localized.prefixTr, localized.body, bodyValues)
         : messageBody;
       const data: Record<string, string> = {
         event: "notify",
