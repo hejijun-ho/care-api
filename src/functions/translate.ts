@@ -98,6 +98,81 @@ async function libreTranslate(texts: string[], source: string, target: string): 
   return out != null ? [String(out)] : texts;
 }
 
+// ── 術語保護層 ──────────────────────────────────────────────────────────────
+// 送 MT 之前把長照領域詞換成哨符，翻完再換回校訂過的目標語詞。
+//
+// 為什麼要：MT 不懂台灣長照用語，而且錯得危險。實測「記得幫她拍背」→
+// en "remember to slap her back"、id "ingat menamparnya"、th "อย่าลืมตบหลังเธอ"
+// ——一句排痰的照顧指令變成毆打被照顧者。這是安全問題，不是品質問題。
+// 本層與翻譯引擎無關：之後換任何引擎，這些詞仍然照校訂譯文輸出。
+//
+// 哨符格式 Xy<n>yX 是六語言實測選出來的（過程見 tech_report/i18n_audit_2026-09-04）：
+//   含標點的（⟦⟧ [[ ]] { } @ @）→ 六個語言全被打爛
+//   全大寫 X1X                  → 存活 6/6，但害 en/vi 整句變全大寫
+//   小寫 x1x / tk1              → 被插空白（x 1x）、被音譯（ทีเควัน）或整個消失
+//   Xy<n>yX                     → 存活 6/6、多哨符順序不變、不觸發全大寫
+const GLOSSARY_TTL_MS = 5 * 60 * 1000;
+type GlossaryTerm = { source_term: string; target_term: string };
+const glossaryCache = new Map<string, { at: number; terms: GlossaryTerm[] }>();
+
+/// 目標語言的術語表（長詞優先，讓「翻身拍背」贏過「拍背」）。讀失敗回空陣列＝不保護，
+/// 絕不讓術語表把整個翻譯打掛。
+async function glossaryFor(lang: string): Promise<GlossaryTerm[]> {
+  const hit = glossaryCache.get(lang);
+  if (hit && Date.now() - hit.at < GLOSSARY_TTL_MS) return hit.terms;
+  try {
+    const rows = await careRest<GlossaryTerm[]>(
+      `translation_glossary?select=source_term,target_term&target_lang=eq.${encodeURIComponent(lang)}`,
+    );
+    const terms = (rows ?? [])
+      .filter((r) => r.source_term && r.target_term)
+      .sort((a, b) => b.source_term.length - a.source_term.length);
+    glossaryCache.set(lang, { at: Date.now(), terms });
+    return terms;
+  } catch (e) {
+    console.error("[translate] glossary load failed", { lang, message: String(e) });
+    return [];
+  }
+}
+
+function sentinel(n: number): string {
+  return `Xy${n}yX`;
+}
+
+/// 把 [text] 裡的術語換成哨符；回傳替換後的字串與 哨符編號→目標語詞 的對照。
+/// 匯出供測試（tests/glossary_protection_test.ts）；正式流程只由本檔內部呼叫。
+export function protectTerms(text: string, terms: GlossaryTerm[]): { prepared: string; map: Map<number, string> } {
+  const map = new Map<number, string>();
+  let prepared = text;
+  let n = 0;
+  for (const t of terms) {
+    if (!prepared.includes(t.source_term)) continue;
+    n += 1;
+    const token = sentinel(n);
+    prepared = prepared.split(t.source_term).join(token);
+    map.set(n, t.target_term);
+  }
+  return { prepared, map };
+}
+
+/// 還原哨符。**依編號還原、不依位置**——譯文會重排語序，位置式還原會把兩個詞對調。
+/// 容忍 MT 在哨符裡插空白或改大小寫（實測 Xy<n>yX 不會，但備而不用）。
+/// 匯出供測試（tests/glossary_protection_test.ts）；正式流程只由本檔內部呼叫。
+export function restoreTerms(text: string, map: Map<number, string>): string {
+  if (map.size === 0) return text;
+  let out = text.replace(/X\s*y\s*(\d+)\s*y\s*X/gi, (whole, digits: string) => {
+    const term = map.get(Number(digits));
+    return term ?? whole;
+  });
+  // 哨符被 MT 整個吃掉時，把漏掉的術語補在句尾，寧可讀起來突兀也不要遺漏照顧指示。
+  const missing = [...map.entries()].filter(([n]) => !text.match(new RegExp(`X\\s*y\\s*${n}\\s*y\\s*X`, "i")));
+  if (missing.length) {
+    console.error("[translate] sentinel lost", { count: missing.length });
+    out = `${out}（${missing.map(([, term]) => term).join("、")}）`;
+  }
+  return out;
+}
+
 const handleRequest = async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -164,12 +239,16 @@ const handleRequest = async (req: Request): Promise<Response> => {
       }
     }
 
-    // ② 未命中 → 繁轉簡（若來源繁中）→ LibreTranslate → 繁化（若目標繁中）。
+    // ② 未命中 → 術語保護 → 繁轉簡（若來源繁中）→ LibreTranslate → 繁化（若目標繁中）→ 術語還原。
     const misses = uniques.filter((t) => !translated.has(t));
     if (misses.length) {
-      const prepared = isTraditional(from) ? misses.map((t) => toSimplified(t)) : misses;
+      // 術語表的 key 是中文，所以只在「來源是中文」時保護。
+      const terms = isTraditional(from) || isSimplified(from) ? await glossaryFor(to) : [];
+      const guarded = misses.map((t) => protectTerms(t, terms));
+      const prepared = guarded.map((g) => (isTraditional(from) ? toSimplified(g.prepared) : g.prepared));
       const raw = await libreTranslate(prepared, srcLt, tgtLt);
-      const finalOut = tradTarget ? raw.map((t) => toTraditional(t)) : raw;
+      const restored = raw.map((t, i) => restoreTerms(t, guarded[i].map));
+      const finalOut = tradTarget ? restored.map((t) => toTraditional(t)) : restored;
       const cacheRows = misses.map((t, i) => {
         const out = (finalOut[i] ?? t).toString();
         translated.set(t, out);
