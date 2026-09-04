@@ -200,6 +200,32 @@ const handleRequest = async (req: Request): Promise<Response> => {
       return json({ error: "payload too large" }, 400);
     }
 
+    const result = await translateTexts(rawTexts, from, to);
+    return json({ ...result, from, to });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[translate] failed", { message });
+    return json({ error: message }, 500);
+  }
+};
+
+export type TranslateResult = {
+  translations: string[];
+  provider: string;
+  untranslated?: boolean;
+};
+
+/// 完整的翻譯鏈：① translation_cache（含人工校訂，查表先於 MT）→ ② 術語保護 ＋
+/// LibreTranslate → 寫回快取。回傳與 [rawTexts] 等長的譯文。
+///
+/// 匯出是為了讓 send-notification 直接用同一條鏈（推播要依**收訊者**的語言翻標題與句子），
+/// 不必對自己發一次 HTTP。
+export async function translateTexts(
+  rawTexts: string[],
+  from: string,
+  to: string,
+): Promise<TranslateResult> {
+  {
     // from='auto' → 交給 LibreTranslate 自動偵測（聊聊：非中文對方訊息用；中文訊息前端會直接給 zh-TW）。
     const autoSrc = from.trim().toLowerCase() === 'auto';
     const srcLt = autoSrc ? 'auto' : ltCode(from);
@@ -212,7 +238,7 @@ const handleRequest = async (req: Request): Promise<Response> => {
 
     // 來源或目標 LibreTranslate 不支援，或來源＝目標 → 原文回（待 LLM 補）。
     if (srcLt === null || tgtLt === null || sameLang) {
-      return json({ translations: rawTexts, from, to, provider: "passthrough", untranslated: true });
+      return { translations: rawTexts, provider: "passthrough", untranslated: true };
     }
 
     // 去重＋只翻非空白。
@@ -276,12 +302,8 @@ const handleRequest = async (req: Request): Promise<Response> => {
     }
 
     const translations = rawTexts.map((t) => (t.trim() === "" ? t : translated.get(t) ?? t));
-    return json({ translations, from, to, provider: "libretranslate" });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[translate] failed", { message });
-    return json({ error: message }, 500);
+    return { translations, provider: "libretranslate" };
   }
-};
+}
 
 export default handleRequest;

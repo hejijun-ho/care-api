@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getMessaging, type Messaging } from "firebase-admin/messaging";
+import { translateTexts } from "./translate.ts";
 
 // 一般推播（訊息／待處理事項／公告）。與 send-call-push 完全獨立、互不影響通話：
 //  - data.event = "notify"（通話是 "call_invite"/"call_cancel"，走 CallKit，不進這裡）
@@ -235,6 +236,56 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+// ── 依收訊者語言在地化 ──────────────────────────────────────────────────────
+// 推播是「發訊端組文案、收訊端收」，所以收訊者的語言必須在**這裡**才查得到——
+// 發訊的 DB 觸發器不知道對方看什麼語言。
+//
+// ⚠ 只翻 title 與 body；**body_prefix 一個字都不翻**。DB 那邊的推播內文是
+// 「被照顧者姓名・服務類型」＋固定句子組成的，整串送去機器翻譯等於把姓名送出去
+// （而且每個姓名都是新的翻譯快取鍵，永遠不命中）。呼叫端把姓名放 body_prefix、
+// 把固定句子放 body，這裡翻完再接回去。
+
+/// 取每位收訊者的語言（user_settings.language）；查不到或失敗一律當 zh-TW。
+async function languagesForUsers(userIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!userIds.length) return out;
+  try {
+    for (const group of chunk(userIds, 200)) {
+      const rows = await publicRest<Array<{ user_id: string; language: string | null }>>(
+        "user_settings",
+        new URLSearchParams({
+          select: "user_id,language",
+          user_id: `in.(${group.join(",")})`,
+        }),
+      );
+      for (const r of rows) {
+        const lang = (r.language ?? "").trim();
+        if (lang) out.set(r.user_id, lang);
+      }
+    }
+  } catch (e) {
+    // 查不到語言就全部用中文送出，不因為在地化失敗而漏送推播。
+    console.error("[send-notification] language lookup failed", { message: errorMessage(e) });
+  }
+  return out;
+}
+
+/// 把 title / body 翻成 [lang]。任何失敗都回原文——推播寧可是中文，也不能不送。
+async function localize(
+  title: string,
+  body: string,
+  lang: string,
+): Promise<{ title: string; body: string }> {
+  if (!lang || lang === "zh-TW" || (!title && !body)) return { title, body };
+  try {
+    const { translations } = await translateTexts([title, body], "zh-TW", lang);
+    return { title: translations[0] ?? title, body: translations[1] ?? body };
+  } catch (e) {
+    console.error("[send-notification] localize failed", { lang, message: errorMessage(e) });
+    return { title, body };
+  }
+}
+
 const handleRequest = async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -252,6 +303,11 @@ const handleRequest = async (req: Request): Promise<Response> => {
     const body = (await req.json()) as JsonRecord;
     const title = String(body.title ?? "").trim();
     const messageBody = String(body.body ?? "").trim();
+    // 動態前綴（被照顧者姓名・服務類型…）：原樣接在譯文前面，**永不送去翻譯**。
+    // 這個 **key 存在與否**＝呼叫端是否採用「前綴／句子分開」的約定，也就是 body 可不可以翻。
+    // 值可以是空字串（例如服務類型剛好沒填），那仍代表 body 是乾淨的句子、可以翻。
+    const bodySplit = Object.prototype.hasOwnProperty.call(body, "body_prefix");
+    const bodyPrefix = String(body.body_prefix ?? "").trim();
     const route = String(body.route ?? "").trim();
     if (!title && !messageBody) {
       return json({ error: "title or body is required" }, 400);
@@ -330,15 +386,42 @@ const handleRequest = async (req: Request): Promise<Response> => {
       return json({ ok: true, attempted: 0, sent: 0, failed: 0, skipped: "no_tokens" });
     }
 
-    const data: Record<string, string> = { event: "notify", route, title, body: messageBody };
+    // 依收訊者語言分組：同一則推播，中文使用者收中文、印尼看護收印尼文。
+    // 查不到語言的一律當 zh-TW（＝原文，不經翻譯）。
+    const langByUser = await languagesForUsers(
+      Array.from(new Set(deliverable.map((t) => t.user_id).filter(Boolean))),
+    );
+    const byLang = new Map<string, TokenRow[]>();
+    for (const row of deliverable) {
+      const lang = langByUser.get(row.user_id) || "zh-TW";
+      const bucket = byLang.get(lang);
+      if (bucket) bucket.push(row);
+      else byLang.set(lang, [row]);
+    }
 
     let sent = 0;
     let failed = 0;
     const deadIds: string[] = [];
-    for (const group of chunk(deliverable, MULTICAST_CHUNK)) {
+    for (const [lang, rows] of byLang) {
+      // ⚠ 安全預設：**沒有帶 body_prefix 就不翻 body**。
+      // 現有呼叫端（DB 觸發器、app 聊天推播）傳來的 body 是已經把姓名／訊息內容組進去的
+      // 完整字串，整串送去翻譯等於把使用者資料送出去。呼叫端要先把動態值拆到
+      // body_prefix、把固定句子留在 body，才代表「這句可以翻」。
+      // 標題不受此限——DB 那邊的 title 全是固定片語（「有買家出價」「服務已完成」…）。
+      const localized = await localize(title, bodySplit ? messageBody : "", lang);
+      const finalBody = bodySplit
+        ? [bodyPrefix, localized.body].filter((s) => s).join(" ")
+        : messageBody;
+      const data: Record<string, string> = {
+        event: "notify",
+        route,
+        title: localized.title,
+        body: finalBody,
+      };
+      for (const group of chunk(rows, MULTICAST_CHUNK)) {
       const response = await (await messaging()).sendEachForMulticast({
         tokens: group.map((row) => row.fcm_token),
-        notification: { title: title || "通知", body: messageBody },
+        notification: { title: localized.title || "通知", body: finalBody },
         data,
         android: {
           priority: "high",
@@ -367,6 +450,7 @@ const handleRequest = async (req: Request): Promise<Response> => {
           deadIds.push(group[index].id);
         }
       });
+      }
     }
     await disableDeadTokens(deadIds);
 
