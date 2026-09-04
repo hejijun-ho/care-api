@@ -144,9 +144,14 @@ function sentinel(n: number): string {
 // 六語言 × 3 句骨架的 A/B 實測，哨符存活率「不留白 30/30、前後留白 18/30」。
 // 留白會把中文句子切碎，MT 常常直接把落單的哨符整個丟掉（句尾尤其嚴重）。
 
-/// 哨符樣式：**至少要有一個 X** 才算（單純的 `y3y` 可能是原文的一部分）。
-/// 允許缺頭或缺尾的 X，因為 MT 偶爾會吃掉一個。
-const SENTINEL_RE = /(?:X\s*y\s*(\d+)\s*y\s*X?|y\s*(\d+)\s*y\s*X)/gi;
+/// 哨符樣式。實測 MT 會用三種方式弄壞 `Xy<n>yX`，三種都要接得住：
+///   1. 吃掉尾巴的 X（相鄰哨符 `Xy1yXXy2yX` 的 `XX` 被併成一個）→ `Xy1yX` + `y2yX`
+///   2. 吃掉開頭的 X                                             → `y2yX`
+///   3. 吃掉中間的一個 y（實測泰文）                              → `Xy1X`
+/// 共同底線：**至少要有一個 X**（單純的 `y3y` 或 `1` 可能是原文的一部分），
+/// 而且只有編號真的在對照表裡才會被換掉，所以誤傷原文的機會極低。
+const SENTINEL_RE =
+  /(?:X\s*y\s*(\d+)\s*y\s*X?|y\s*(\d+)\s*y\s*X|X\s*y?\s*(\d+)\s*y?\s*X)/gi;
 
 /// 把 [text] 裡的術語換成哨符；回傳替換後的字串與 哨符編號→目標語詞 的對照。
 /// 匯出供測試（tests/glossary_protection_test.ts）；正式流程只由本檔內部呼叫。
@@ -185,8 +190,15 @@ export function restoreTerms(text: string, map: Map<number, string>): string {
       : "";
   let out = text.replace(
     SENTINEL_RE,
-    (whole: string, a: string | undefined, b: string | undefined, offset: number, full: string) => {
-      const n = Number(a ?? b);
+    (
+      whole: string,
+      a: string | undefined,
+      b: string | undefined,
+      c: string | undefined,
+      offset: number,
+      full: string,
+    ) => {
+      const n = Number(a ?? b ?? c);
       const term = map.get(n);
       if (term == null) return whole; // 不是我們發出去的編號 → 當作原文，不要亂動
       restored.add(n);

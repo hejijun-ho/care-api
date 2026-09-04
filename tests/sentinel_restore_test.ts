@@ -107,6 +107,17 @@ check(
   "vỗ lưng ống thông dạ dày",
 );
 
+check(
+  "MT 吃掉中間的 y 也還原得回來（實測泰文出現 Xy1X）",
+  restoreTerms("please Xy1X now", new Map([[1, "back percussion"]])),
+  "please back percussion now",
+);
+check(
+  "只有數字沒有 X 就不動它（避免誤傷原文的數字）",
+  restoreTerms("sit for 1 minute", new Map([[1, "back percussion"]])),
+  "sit for 1 minute（back percussion）",
+);
+
 check("大小寫不敏感", restoreTerms("xY1Yx", map2), "NG tube（tube feeding）");
 
 // ── protect → 模擬 MT → restore 的來回 ─────────────────────────────────────
@@ -120,7 +131,8 @@ check("大小寫不敏感", restoreTerms("xY1Yx", map2), "NG tube（tube feeding
     .replace(/ {2,}/g, " ");
   const out = restoreTerms(mtOutput, map);
   check("來回之後三個術語都在", [NG, FEED, PAT].every((t) => out.includes(t.target_term)), true);
-  check("來回之後沒有哨符碎片外洩", /\bX?y\d+yX?\b/i.test(out), false);
+  check("來回之後沒有哨符碎片外洩（三種破壞形態都算）",
+        /X\s*y?\s*\d+\s*y?\s*X|y\s*\d+\s*y\s*X/i.test(out), false);
 }
 
 console.log(`\n失敗數: ${failures}`);
