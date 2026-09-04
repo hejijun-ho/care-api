@@ -30,7 +30,10 @@ const PAT = { source_term: "拍背", target_term: "back percussion" };
 // ── protectTerms ───────────────────────────────────────────────────────────
 {
   const { prepared, map } = protectTerms("鼻胃管灌食後要坐著三十分鐘", [NG, FEED]);
-  check("相鄰術語不會產生 XX（那會被 MT 併成一個 X）", /XX/.test(prepared), false);
+  // 相鄰術語的哨符會相接成 `Xy1yXXy2yX`。**不靠留白迴避**——六語言實測，
+  // 哨符存活率「不留白 30/30、前後留白 18/30」：留白把中文句子切碎，
+  // MT 常常把落單的哨符整個丟掉。所以 XX 被併掉的情況交給 restoreTerms 收拾。
+  check("相鄰術語會產生 XX（記錄現況，收拾交給還原端）", /XX/.test(prepared), true);
   check("兩個術語都進了對照表", [...map.entries()], [[1, "NG tube"], [2, "tube feeding"]]);
 }
 {

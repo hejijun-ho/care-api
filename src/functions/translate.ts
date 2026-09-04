@@ -139,13 +139,10 @@ function sentinel(n: number): string {
   return `Xy${n}yX`;
 }
 
-/// 哨符在句子裡的樣子：**前後各留一個空白**。
-/// 相鄰術語（例：「鼻胃管灌食」）若直接相接會變成 `Xy2yXXy3yX`，中間出現 `XX`；
-/// 實測 MT 會把它併成一個 `X`，還原時第一個哨符吃掉共用的那個 X，第二個就只剩
-/// `y3yX` 碎片直接漏到使用者眼前。留白就不會有 `XX`。
-function sentinelToken(n: number): string {
-  return ` ${sentinel(n)} `;
-}
+// 哨符**不加空白**。相鄰術語（例：「鼻胃管灌食」）會變成 `Xy2yXXy3yX`，中間出現 `XX`，
+// MT 可能把它併成一個 X——但那由 restoreTerms 收拾（見下），不要靠留白解決：
+// 六語言 × 3 句骨架的 A/B 實測，哨符存活率「不留白 30/30、前後留白 18/30」。
+// 留白會把中文句子切碎，MT 常常直接把落單的哨符整個丟掉（句尾尤其嚴重）。
 
 /// 哨符樣式：**至少要有一個 X** 才算（單純的 `y3y` 可能是原文的一部分）。
 /// 允許缺頭或缺尾的 X，因為 MT 偶爾會吃掉一個。
@@ -160,7 +157,7 @@ export function protectTerms(text: string, terms: GlossaryTerm[]): { prepared: s
   for (const t of terms) {
     if (!prepared.includes(t.source_term)) continue;
     n += 1;
-    prepared = prepared.split(t.source_term).join(sentinelToken(n));
+    prepared = prepared.split(t.source_term).join(sentinel(n));
     map.set(n, t.target_term);
   }
   return { prepared, map };
