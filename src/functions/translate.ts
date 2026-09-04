@@ -139,6 +139,18 @@ function sentinel(n: number): string {
   return `Xy${n}yX`;
 }
 
+/// 哨符在句子裡的樣子：**前後各留一個空白**。
+/// 相鄰術語（例：「鼻胃管灌食」）若直接相接會變成 `Xy2yXXy3yX`，中間出現 `XX`；
+/// 實測 MT 會把它併成一個 `X`，還原時第一個哨符吃掉共用的那個 X，第二個就只剩
+/// `y3yX` 碎片直接漏到使用者眼前。留白就不會有 `XX`。
+function sentinelToken(n: number): string {
+  return ` ${sentinel(n)} `;
+}
+
+/// 哨符樣式：**至少要有一個 X** 才算（單純的 `y3y` 可能是原文的一部分）。
+/// 允許缺頭或缺尾的 X，因為 MT 偶爾會吃掉一個。
+const SENTINEL_RE = /(?:X\s*y\s*(\d+)\s*y\s*X?|y\s*(\d+)\s*y\s*X)/gi;
+
 /// 把 [text] 裡的術語換成哨符；回傳替換後的字串與 哨符編號→目標語詞 的對照。
 /// 匯出供測試（tests/glossary_protection_test.ts）；正式流程只由本檔內部呼叫。
 export function protectTerms(text: string, terms: GlossaryTerm[]): { prepared: string; map: Map<number, string> } {
@@ -148,29 +160,52 @@ export function protectTerms(text: string, terms: GlossaryTerm[]): { prepared: s
   for (const t of terms) {
     if (!prepared.includes(t.source_term)) continue;
     n += 1;
-    const token = sentinel(n);
-    prepared = prepared.split(t.source_term).join(token);
+    prepared = prepared.split(t.source_term).join(sentinelToken(n));
     map.set(n, t.target_term);
   }
   return { prepared, map };
 }
 
 /// 還原哨符。**依編號還原、不依位置**——譯文會重排語序，位置式還原會把兩個詞對調。
-/// 容忍 MT 在哨符裡插空白或改大小寫（實測 Xy<n>yX 不會，但備而不用）。
+/// 容忍 MT 在哨符裡插空白、改大小寫、或吃掉頭尾其中一個 X。
 /// 匯出供測試（tests/glossary_protection_test.ts）；正式流程只由本檔內部呼叫。
 export function restoreTerms(text: string, map: Map<number, string>): string {
   if (map.size === 0) return text;
-  let out = text.replace(/X\s*y\s*(\d+)\s*y\s*X/gi, (whole, digits: string) => {
-    const term = map.get(Number(digits));
-    return term ?? whole;
-  });
+  // 「哪些術語真的還原到了」必須以**替換當下實際命中的編號**為準，不能事後拿字串再比對一次：
+  // `Xy2yXy3yX` 裡確實含有子字串 `Xy3yX`，但那個 X 已經被 #2 用掉了，事後比對會誤判成
+  // 「#3 有還原」，於是碎片留在譯文裡、連補救都不會觸發。
+  const restored = new Set<number>();
+  // MT 若把哨符間的空白吃掉，相鄰兩個術語會黏成 "NG tubetube feeding"，所以要補分隔。
+  // 但**不是每種文字都用空白斷詞**：中日文與泰文不用，硬塞空白反而不自然
+  //（「経鼻胃管 を」）。韓文與越南文則是用空白的，只看 ASCII 會漏掉
+  //（韓文「비위관경관 영양」黏在一起、越南文有變音符號不算 ASCII）。
+  const NO_SPACE_SCRIPT = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u0e00-\u0e7f]/;
+  const WORDISH = /[^\s\p{P}\p{S}]/u; // 非空白、非標點、非符號
+  const sep = (side: string | undefined, edge: string | undefined) =>
+    side && edge && WORDISH.test(side) && WORDISH.test(edge) &&
+    !NO_SPACE_SCRIPT.test(side) && !NO_SPACE_SCRIPT.test(edge)
+      ? " "
+      : "";
+  let out = text.replace(
+    SENTINEL_RE,
+    (whole: string, a: string | undefined, b: string | undefined, offset: number, full: string) => {
+      const n = Number(a ?? b);
+      const term = map.get(n);
+      if (term == null) return whole; // 不是我們發出去的編號 → 當作原文，不要亂動
+      restored.add(n);
+      const before = sep(full[offset - 1], term[0]);
+      const after = sep(full[offset + whole.length], term[term.length - 1]);
+      return `${before}${term}${after}`;
+    },
+  );
   // 哨符被 MT 整個吃掉時，把漏掉的術語補在句尾，寧可讀起來突兀也不要遺漏照顧指示。
-  const missing = [...map.entries()].filter(([n]) => !text.match(new RegExp(`X\\s*y\\s*${n}\\s*y\\s*X`, "i")));
+  const missing = [...map.entries()].filter(([n]) => !restored.has(n));
   if (missing.length) {
     console.error("[translate] sentinel lost", { count: missing.length });
     out = `${out}（${missing.map(([, term]) => term).join("、")}）`;
   }
-  return out;
+  // 哨符留白造成的多餘空格收乾淨（標點前不留空白）。
+  return out.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+([，。、！？：；）】」』,.!?;:)\]])/g, "$1").trim();
 }
 
 const handleRequest = async (req: Request): Promise<Response> => {
