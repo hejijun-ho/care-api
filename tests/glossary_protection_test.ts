@@ -5,6 +5,10 @@
  * 這支測試不需要部署就能證明整條設計成立：它把 translate.ts 匯出的
  * protectTerms/restoreTerms 接上真實的機器翻譯，重現線上會發生的事。
  *
+ * ⚠ 術語保護層**部署之後**，「未保護」那一欄其實也會被伺服器保護（兩欄會一模一樣）。
+ *   要看沒有保護的對照組，請打一個還沒部署本層的環境。部署後這支測試的價值在於
+ *   下面兩個斷言仍然成立：譯文不得是暴力行為、術語不得遺失。
+ *
  * 動機：實測「記得幫她拍背」被翻成「打她耳光 / slap her back / ตบหลังเธอ」——
  * 一句排痰的照顧指令變成毆打被照顧者。這支測試就是釘住那件事不再發生。
  *
@@ -117,7 +121,8 @@ async function main() {
       const violentPlain = VIOLENT.some((re) => re.test(plain[i] ?? ""));
       const violentGuarded = VIOLENT.some((re) => re.test(restored[i] ?? ""));
       console.log(`原文  : ${CASES[i]}`);
-      console.log(`未保護: ${plain[i]}${violentPlain ? "   ← 翻成暴力行為" : ""}`);
+      // 部署後這一欄不再是真的「未保護」——伺服器自己也會保護（見檔頭說明）。
+      console.log(`直接送: ${plain[i]}${violentPlain ? "   ← 翻成暴力行為" : ""}`);
       console.log(`已保護: ${restored[i]}${violentGuarded ? "   ← 仍是暴力行為" : ""}`);
       if (violentGuarded) failures += 1;
       // 術語必須真的出現在譯文裡，否則保護等於沒做。
