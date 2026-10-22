@@ -4,33 +4,34 @@
 // buyer-keyed wallet_apply_for_user RPC (service_role).
 //
 // 金流手續費「外加」由使用者吸收：使用者選「面額」(進錢包的金額)，綠界實收
-// 面額 + 手續費；錢包只入面額。手續費一律用國內卡費率 2.45%（海外卡的差額由平台
-// 吸收，屬少數）。
+// 面額 + 手續費；錢包只入面額。手續費一律用國內卡費率（現行 2.45%，海外卡的差額由平台
+// 吸收，屬少數）。費率與金額範圍讀 care_service_config（見 pricing.ts），不再寫死。
 import { careInsert, careRpc, type AdminClient } from "./db.ts";
+import { DEFAULT_CARE_PRICING, type CarePricing } from "./pricing.ts";
 import { updateOrder, type CareEcpayOrderRow } from "./subscription.ts";
 
-export const TOPUP_MIN = 100;
-export const TOPUP_MAX = 100000;
-
-/** 一律外加國內卡費率；海外卡(3.8%)的差 1.35% 由平台吸收（少數）。 */
-export const TOPUP_FEE_RATE = 0.0245;
-
-/** 面額 → {面額, 手續費(無條件進位), 綠界實收} 。 */
-export function computeTopupCharge(faceAmount: number): {
+/**
+ * 面額 → {面額, 手續費(無條件進位), 綠界實收}。整數運算：與舊的 Math.ceil(面額 × 0.0245)
+ * 在 100–100,000 逐一比對完全相同，且不受浮點誤差影響（App 用同一公式顯示）。
+ */
+export function computeTopupCharge(
+  faceAmount: number,
+  pricing: CarePricing = DEFAULT_CARE_PRICING,
+): {
   face: number;
   fee: number;
   charge: number;
 } {
   const face = Math.trunc(faceAmount);
-  const fee = Math.ceil(face * TOPUP_FEE_RATE);
+  const fee = face <= 0 ? 0 : Math.floor((face * pricing.topupFeeBasisPoints + 9999) / 10000);
   return { face, fee, charge: face + fee };
 }
 
-export function normalizeTopupAmount(value: unknown): number {
+export function normalizeTopupAmount(value: unknown, pricing: CarePricing = DEFAULT_CARE_PRICING): number {
   const n = Math.trunc(Number(value));
   if (!Number.isFinite(n)) throw new Error("Top-up amount must be a number");
-  if (n < TOPUP_MIN) throw new Error(`Top-up amount must be at least ${TOPUP_MIN}`);
-  if (n > TOPUP_MAX) throw new Error(`Top-up amount must be at most ${TOPUP_MAX}`);
+  if (n < pricing.topupMinTwd) throw new Error(`Top-up amount must be at least ${pricing.topupMinTwd}`);
+  if (n > pricing.topupMaxTwd) throw new Error(`Top-up amount must be at most ${pricing.topupMaxTwd}`);
   return n;
 }
 
@@ -44,6 +45,7 @@ export async function createTopupOrder(
     fee: number;
     charge: number;
     merchantTradeNo: string;
+    feeBasisPoints: number;
   },
 ): Promise<CareEcpayOrderRow> {
   const rows = await careInsert<CareEcpayOrderRow>(admin, "care_ecpay_orders", {
@@ -62,7 +64,7 @@ export async function createTopupOrder(
       face_amount: input.face, // 進錢包的面額
       fee_twd: input.fee,
       charge_twd: input.charge,
-      fee_rate: TOPUP_FEE_RATE,
+      fee_rate: input.feeBasisPoints / 10000, // 當下套用的費率（留存對帳）
     },
   });
   const order = rows[0];

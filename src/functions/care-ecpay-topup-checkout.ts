@@ -2,6 +2,7 @@
 // 把金額加進 public.wallets.token_balance（真錢預付帳戶）。成交時就從這個餘額扣。
 import { corsHeaders, handleCors } from "../_shared_care/cors.ts";
 import { createDatabaseClient, requireUserId } from "../_shared_care/db.ts";
+import { loadCarePricing } from "../_shared_care/pricing.ts";
 import { buildMerchantTradeNo, normalizeRole } from "../_shared_care/subscription.ts";
 import {
   computeTopupCharge,
@@ -50,12 +51,14 @@ const handleRequest = async (req: Request): Promise<Response> => {
     const body = (await req.json()) as Record<string, unknown>;
 
     const role = normalizeRole(body.role);
-    const amount = normalizeTopupAmount(body.amount ?? body.topupAmount);
+    const admin = createDatabaseClient(config);
+    // 手續費率與金額範圍讀 care_service_config（App 顯示讀同一份），不再寫死。
+    const pricing = await loadCarePricing(admin);
+    const amount = normalizeTopupAmount(body.amount ?? body.topupAmount, pricing);
 
     // 手續費外加：使用者選面額，綠界實收 = 面額 + 手續費；錢包只入面額。
-    const { face, fee, charge } = computeTopupCharge(amount);
+    const { face, fee, charge } = computeTopupCharge(amount, pricing);
 
-    const admin = createDatabaseClient(config);
     const merchantTradeNo = await buildMerchantTradeNo(admin, "CTU");
     const order = await createTopupOrder(admin, {
       userId,
@@ -64,6 +67,7 @@ const handleRequest = async (req: Request): Promise<Response> => {
       fee,
       charge,
       merchantTradeNo,
+      feeBasisPoints: pricing.topupFeeBasisPoints,
     });
 
     const callbackBaseUrl = resolveCallbackBaseUrl(req, config.supabasePublicUrl);

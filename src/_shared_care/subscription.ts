@@ -3,10 +3,12 @@
 // on file) stays on public.user_settings — exactly the tables the app already uses.
 import {
   careInsert,
+  careRpc,
   careSelectOne,
   careUpdate,
   type AdminClient,
 } from "./db.ts";
+import { DEFAULT_CARE_PRICING, type CarePricing } from "./pricing.ts";
 
 export type CareRole = "client" | "caregiver";
 
@@ -19,16 +21,18 @@ export type CarePlan = {
   execTimes: number; // 綠界定期定額執行次數上限（M≤99、Y≤9）
 };
 
-// 家屬與看護同價（訂閱費跟家屬相同）。
-export const CARE_PLANS: Record<string, CarePlan> = {
-  monthly: { code: "monthly", name: "照護月費", amount: 199, periodType: "M", frequency: 1, execTimes: 99 },
-  yearly: { code: "yearly", name: "照護年費", amount: 1990, periodType: "Y", frequency: 1, execTimes: 9 },
+// 家屬與看護同價（訂閱費跟家屬相同）。價格讀 care_service_config（見 pricing.ts），
+// 這裡只放方案的綠界週期設定；價格只影響新訂閱，既有定期定額照原金額扣款。
+const CARE_PLAN_SHAPES: Record<string, Omit<CarePlan, "amount">> = {
+  monthly: { code: "monthly", name: "照護月費", periodType: "M", frequency: 1, execTimes: 99 },
+  yearly: { code: "yearly", name: "照護年費", periodType: "Y", frequency: 1, execTimes: 9 },
 };
 
-export function resolveCarePlan(planCode: string): CarePlan {
-  const plan = CARE_PLANS[String(planCode ?? "").trim()];
-  if (!plan) throw new Error(`Unknown care plan: ${planCode}`);
-  return plan;
+export function resolveCarePlan(planCode: string, pricing: CarePricing = DEFAULT_CARE_PRICING): CarePlan {
+  const shape = CARE_PLAN_SHAPES[String(planCode ?? "").trim()];
+  if (!shape) throw new Error(`Unknown care plan: ${planCode}`);
+  const amount = shape.periodType === "Y" ? pricing.subscriptionYearlyTwd : pricing.subscriptionMonthlyTwd;
+  return { ...shape, amount };
 }
 
 export function normalizeRole(value: unknown): CareRole {
@@ -180,6 +184,31 @@ function addPeriod(base: Date, periodType: string, count: number): Date {
   return d;
 }
 
+// 這個人（這個角色）優惠碼權益的最晚結束時間；沒有碼、或 DB 還沒有這支函式（正式庫）就回 null，照舊從付款時間算。
+async function codeChainEnd(admin: AdminClient, userId: string, role: CareRole): Promise<Date | null> {
+  try {
+    const raw = await careRpc<string | null>(admin, "subscription_code_chain_end", { p_user: userId, p_role: role });
+    return raw ? new Date(raw) : null;
+  } catch (error) {
+    console.warn("[care subscription] subscription_code_chain_end unavailable", error);
+    return null;
+  }
+}
+
+// 下一期已經排好（排隊中的優惠碼、或已經預付）→ 不能再訂閱。DB 還沒有這支函式時不擋。
+export async function nextPeriodAlreadySet(admin: AdminClient, userId: string, role: CareRole): Promise<boolean> {
+  try {
+    const state = await careRpc<{ next_period_set?: boolean }>(admin, "subscription_queue_state", {
+      p_user: userId,
+      p_role: role,
+    });
+    return state?.next_period_set === true;
+  } catch (error) {
+    console.warn("[care subscription] subscription_queue_state unavailable", error);
+    return false;
+  }
+}
+
 /**
  * A successful (recurring) charge: extend the subscription on user_settings and
  * mark the card on file. Renewal extends from the current expiry if still active,
@@ -208,7 +237,10 @@ export async function applySubscriptionPayment(
   const currentExpiryRaw =
     role === "caregiver" ? settings?.seller_subscription_expires_at : settings?.subscription_expires_at;
   const currentExpiry = currentExpiryRaw ? new Date(currentExpiryRaw) : null;
-  const base = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+  let base = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+  // 優惠碼期間刷卡（預付）：付費接在碼的最晚結束時間後面，不跟碼重疊（20261022120000_subscription_code_queue.sql）
+  const codeEnd = await codeChainEnd(admin, order.user_id, role);
+  if (codeEnd && codeEnd.getTime() > base.getTime()) base = codeEnd;
   const newExpiry = addPeriod(base, plan.periodType, plan.frequency).toISOString();
 
   const patch: Record<string, unknown> = {
