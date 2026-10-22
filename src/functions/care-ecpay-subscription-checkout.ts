@@ -5,6 +5,7 @@ import { createDatabaseClient, requireUserId } from "../_shared_care/db.ts";
 import {
   buildMerchantTradeNo,
   createSubscriptionOrder,
+  nextPeriodAlreadySet,
   normalizeRole,
   resolveCarePlan,
 } from "../_shared_care/subscription.ts";
@@ -53,6 +54,10 @@ const handleRequest = async (req: Request): Promise<Response> => {
     const plan = resolveCarePlan(String(body.planCode ?? body.plan_code ?? ""));
 
     const admin = createDatabaseClient(config);
+    // 只能決定下一期：已經排了優惠碼（或已經預付）就不能再訂閱（同 haiglobals modules/54）
+    if (await nextPeriodAlreadySet(admin, userId, role)) {
+      return json({ error: "next_period_already_set" }, 400);
+    }
     const merchantTradeNo = await buildMerchantTradeNo(admin);
     const order = await createSubscriptionOrder(admin, { userId, role, plan, merchantTradeNo });
 
