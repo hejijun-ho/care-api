@@ -8,6 +8,7 @@ import {
   careUpdate,
   type AdminClient,
 } from "./db.ts";
+import { DEFAULT_CARE_PRICING, type CarePricing } from "./pricing.ts";
 
 export type CareRole = "client" | "caregiver";
 
@@ -20,16 +21,18 @@ export type CarePlan = {
   execTimes: number; // 綠界定期定額執行次數上限（M≤99、Y≤9）
 };
 
-// 家屬與看護同價（訂閱費跟家屬相同）。
-export const CARE_PLANS: Record<string, CarePlan> = {
-  monthly: { code: "monthly", name: "照護月費", amount: 199, periodType: "M", frequency: 1, execTimes: 99 },
-  yearly: { code: "yearly", name: "照護年費", amount: 1990, periodType: "Y", frequency: 1, execTimes: 9 },
+// 家屬與看護同價（訂閱費跟家屬相同）。價格讀 care_service_config（見 pricing.ts），
+// 這裡只放方案的綠界週期設定；價格只影響新訂閱，既有定期定額照原金額扣款。
+const CARE_PLAN_SHAPES: Record<string, Omit<CarePlan, "amount">> = {
+  monthly: { code: "monthly", name: "照護月費", periodType: "M", frequency: 1, execTimes: 99 },
+  yearly: { code: "yearly", name: "照護年費", periodType: "Y", frequency: 1, execTimes: 9 },
 };
 
-export function resolveCarePlan(planCode: string): CarePlan {
-  const plan = CARE_PLANS[String(planCode ?? "").trim()];
-  if (!plan) throw new Error(`Unknown care plan: ${planCode}`);
-  return plan;
+export function resolveCarePlan(planCode: string, pricing: CarePricing = DEFAULT_CARE_PRICING): CarePlan {
+  const shape = CARE_PLAN_SHAPES[String(planCode ?? "").trim()];
+  if (!shape) throw new Error(`Unknown care plan: ${planCode}`);
+  const amount = shape.periodType === "Y" ? pricing.subscriptionYearlyTwd : pricing.subscriptionMonthlyTwd;
+  return { ...shape, amount };
 }
 
 export function normalizeRole(value: unknown): CareRole {

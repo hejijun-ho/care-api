@@ -2,6 +2,7 @@
 // 之後每期由綠界自動扣款並回調 care-ecpay-return。對映既有 user_settings 訂閱狀態。
 import { corsHeaders, handleCors } from "../_shared_care/cors.ts";
 import { createDatabaseClient, requireUserId } from "../_shared_care/db.ts";
+import { loadCarePricing } from "../_shared_care/pricing.ts";
 import {
   buildMerchantTradeNo,
   createSubscriptionOrder,
@@ -51,13 +52,13 @@ const handleRequest = async (req: Request): Promise<Response> => {
     const body = (await req.json()) as Record<string, unknown>;
 
     const role = normalizeRole(body.role);
-    const plan = resolveCarePlan(String(body.planCode ?? body.plan_code ?? ""));
-
     const admin = createDatabaseClient(config);
     // 只能決定下一期：已經排了優惠碼（或已經預付）就不能再訂閱（同 haiglobals modules/54）
     if (await nextPeriodAlreadySet(admin, userId, role)) {
       return json({ error: "next_period_already_set" }, 400);
     }
+    // 價格讀 care_service_config（App 顯示讀同一份）；只影響新訂閱，既有定期定額照原金額扣款。
+    const plan = resolveCarePlan(String(body.planCode ?? body.plan_code ?? ""), await loadCarePricing(admin));
     const merchantTradeNo = await buildMerchantTradeNo(admin);
     const order = await createSubscriptionOrder(admin, { userId, role, plan, merchantTradeNo });
 
